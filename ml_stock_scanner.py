@@ -21,7 +21,7 @@ CHAT_ID = "-1003805957111"
 
 MODEL_PATH = "model.pkl"
 
-TICKERS_TRAIN = ["AAPL", "NVDA", "TSLA", "AMD", "MSFT", "META", "AMZN"]
+TICKERS_TRAIN = ["AAPL", "NVDA", "TSLA", "AMD", "MSFT", "META", "AMZN", "MU", "INTC", "GOOG","SMCI", "JPM","LLY","PLTR"]
 
 # =========================================
 # UTILS
@@ -31,15 +31,20 @@ def fix_columns(df):
         df.columns = df.columns.get_level_values(0)
     return df
 
+
 def safe_download(ticker, period="3mo"):
     try:
+        if "/" in ticker:
+            return pd.DataFrame()
+
         df = yf.download(ticker, period=period, interval="1d", progress=False)
+
         if df.empty:
             return pd.DataFrame()
-        df = fix_columns(df)
-        return df
+
+        return fix_columns(df)
     except:
-        return pd.DataFrame()
+        return pd.DataFrame()    
 
 # =========================================
 # TELEGRAM
@@ -204,6 +209,7 @@ def scan_market():
     data = (Query()
         .select('name', 'close', 'volume', 'relative_volume_10d_calc', 'RSI', 'EMA50')
         .where(
+            col('close') >= 1,            
             col('relative_volume_10d_calc') > 1.5,
             col('close') > col('EMA50'),
             col('RSI') < 70
@@ -243,6 +249,13 @@ def predict_score(model, features, ticker):
 
     return final_score
 
+
+def is_valid_ticker(ticker):
+    # ❌ ตัด ticker ที่มี /
+    if "/" in ticker:
+        return False
+    return True
+
 # =========================================
 # MAIN
 # =========================================
@@ -258,6 +271,11 @@ def main():
 
     for _, row in df_scan.iterrows():
         ticker = row['name']
+
+        # 🔥 skip ตัวแปลก
+        if not is_valid_ticker(ticker):
+            continue
+
         score = predict_score(model, features, ticker)
 
         if score > 0.8:  # 🔥 filter ตัวเทพ
