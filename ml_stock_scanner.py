@@ -329,12 +329,10 @@ def main():
 Symbol: {ticker}
 Score: {score:.2f}
 RSI: {rsi}
-
 🎯 Entry: {entry:.2f}
 🛑 Stop Loss: {sl:.2f}
 🎯 Take Profit: {tp:.2f}
 📊 RR: {rr:.2f}
-
 """
         print(msg)
         send_alert(msg)
