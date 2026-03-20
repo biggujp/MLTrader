@@ -209,6 +209,7 @@ def scan_market():
     data = (Query()
         .select('name', 'close', 'volume', 'relative_volume_10d_calc', 'RSI', 'EMA50')
         .where(
+            col('exchange').isin(['NASDAQ', 'NYSE']), 
             col('close') >= 1,            
             col('relative_volume_10d_calc') > 1.5,
             col('close') > col('EMA50'),
