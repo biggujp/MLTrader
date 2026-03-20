@@ -250,7 +250,28 @@ def predict_score(model, features, ticker):
 
     return final_score
 
+# =========================================
+# TRADE LEVELS (สำหรับใส่ใน alert เพื่อให้เห็นภาพก่อนเข้าเทรด)
+# =========================================
+def calculate_trade_levels(df):
+    last = df.iloc[-1]
 
+    entry = last['Close']
+
+    # ใช้ ATR จะแม่นกว่า
+    atr = last['ATR']
+
+    stop_loss = entry - (atr * 1.5)
+    take_profit = entry + (atr * 3)
+
+    rr = (take_profit - entry) / (entry - stop_loss)
+
+    return entry, stop_loss, take_profit, rr
+
+
+# =========================================
+# VALID TICKER (กรอง ticker ที่มีรูปแบบแปลกๆ เช่นมี / ซึ่งโมเดลไม่ถนัด)
+# =========================================
 def is_valid_ticker(ticker):
     # ❌ ตัด ticker ที่มี /
     if "/" in ticker:
@@ -261,13 +282,13 @@ def is_valid_ticker(ticker):
 # MAIN
 # =========================================
 def main():
-    print("🚀 Loading model...")
+    print("Loading model...")
     model, features = load_model()
 
-    print("📊 Scanning market...")
+    print("Scanning market...")
     df_scan = scan_market()
 
-    print("🧠 Evaluating...")
+    print("Evaluating...")
     picks = []
 
     for _, row in df_scan.iterrows():
@@ -279,24 +300,41 @@ def main():
 
         score = predict_score(model, features, ticker)
 
-        if score > 0.8:  # 🔥 filter ตัวเทพ
-            picks.append((ticker, score, row['close'], row['RSI']))
+        if score > 0.8:
+            df = safe_download(ticker)
+
+            if df.empty:
+                continue
+
+            df = create_features(df).dropna()
+
+            if len(df) == 0:
+                continue
+
+            entry, sl, tp, rr = calculate_trade_levels(df)
+
+            picks.append((ticker, score, entry, sl, tp, rr, row['RSI']))
 
     picks = sorted(picks, key=lambda x: x[1], reverse=True)[:5]
 
     if not picks:
-        print("❌ No strong signals today")
+        print("No strong signals today")
         return
 
     for p in picks:
-        ticker, score, price, rsi = p
+        ticker, score, entry, sl, tp, rr, rsi = p
 
         msg = f"""
-🚀 TOP STOCK (ML)
+🚀 TRADE SETUP
 Symbol: {ticker}
-Price: {price}
-RSI: {rsi}
 Score: {score:.2f}
+RSI: {rsi}
+
+🎯 Entry: {entry:.2f}
+🛑 Stop Loss: {sl:.2f}
+🎯 Take Profit: {tp:.2f}
+📊 RR: {rr:.2f}
+
 """
         print(msg)
         send_alert(msg)
