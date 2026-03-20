@@ -282,13 +282,13 @@ def is_valid_ticker(ticker):
 # MAIN
 # =========================================
 def main():
-    print("Loading model...")
+    print("🚀Loading model...")
     model, features = load_model()
 
-    print("Scanning market...")
+    print("📊Scanning market...")
     df_scan = scan_market()
 
-    print("Evaluating...")
+    print("🧠Evaluating...")
     picks = []
 
     for _, row in df_scan.iterrows():
