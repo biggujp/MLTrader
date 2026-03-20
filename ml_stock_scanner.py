@@ -188,6 +188,8 @@ def train_model():
 
     joblib.dump((model, features), MODEL_PATH)
     print("✅ Model trained & saved")
+    msg = f"""✅ Model trained & saved"""
+    send_alert(msg)
 
     return model, features
 
@@ -198,6 +200,8 @@ def load_model():
     if os.path.exists(MODEL_PATH):
         model, features = joblib.load(MODEL_PATH)
         print("✅ Loaded saved model")
+        msg = f"""✅ Loaded saved model"""
+        send_alert(msg)
         return model, features
     else:
         return train_model()
@@ -283,12 +287,19 @@ def is_valid_ticker(ticker):
 # =========================================
 def main():
     print("🚀Loading model...")
+    msg = f"""🚀Loading model..."""
+    send_alert(msg)
     model, features = load_model()
 
     print("📊Scanning market...")
+    msg = f"""📊Scanning market..."""
+    send_alert(msg) 
     df_scan = scan_market()
 
     print("🧠Evaluating...")
+    msg = f"""🧠Evaluating..."""
+    send_alert(msg)
+
     picks = []
 
     for _, row in df_scan.iterrows():
