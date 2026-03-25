@@ -31,20 +31,26 @@ def fix_columns(df):
         df.columns = df.columns.get_level_values(0)
     return df
 
-
-def safe_download(ticker, period="3mo"):
+def safe_download(ticker, period="3mo", interval="1d"):
     try:
         if "/" in ticker:
             return pd.DataFrame()
 
-        df = yf.download(ticker, period=period, interval="1d", progress=False)
+        # 🔥 FIX: ถ้าใช้ intraday → จำกัด period
+        if interval in ["1m", "5m", "15m", "30m", "60m"]:
+            period = "60d"
+
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
 
         if df.empty:
             return pd.DataFrame()
 
         return fix_columns(df)
-    except:
+
+    except Exception as e:
+        print(f"Download error {ticker}: {e}")
         return pd.DataFrame()    
+
 
 # =========================================
 # TELEGRAM
@@ -217,7 +223,9 @@ def scan_market():
             col('close') >= 1,            
             col('relative_volume_10d_calc') > 1.5,
             col('close') > col('EMA50'),
-            col('RSI') < 70
+            col('RSI') < 70,
+            col('change') > 2,   # ราคาขึ้นแล้ว
+            col('relative_volume_10d_calc') > 2
         )
         .order_by('volume', ascending=False)
         .limit(30)
@@ -277,8 +285,9 @@ def calculate_trade_levels(df):
 # VALID TICKER (กรอง ticker ที่มีรูปแบบแปลกๆ เช่นมี / ซึ่งโมเดลไม่ถนัด)
 # =========================================
 def is_valid_ticker(ticker):
-    # ❌ ตัด ticker ที่มี /
     if "/" in ticker:
+        return False
+    if len(ticker) > 5:  # ตัดตัวแปลก
         return False
     return True
 
