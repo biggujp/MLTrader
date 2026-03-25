@@ -264,7 +264,6 @@ def scan_market():
             col('exchange').isin(['NASDAQ', 'NYSE']),
             col('close') >= 5,
             col('ATR') > 0.8,
-
             # 🔥 ผ่อนแล้ว (จาก 2 → 1.2)
             col('relative_volume_10d_calc') > 1.8,
             # 🔥 เอา trend พอประมาณ
