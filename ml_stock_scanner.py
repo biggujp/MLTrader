@@ -31,37 +31,45 @@ def fix_columns(df):
         df.columns = df.columns.get_level_values(0)
     return df
 
+def normalize_ticker(ticker):
+    ticker = ticker.strip()
+    # 🔥 แก้ . → -
+    if "." in ticker:
+        ticker = ticker.replace(".", "-")
+    return ticker
+
+
 def safe_download(ticker, period="3mo", interval="1d"):
-    try:
-        if "/" in ticker or ticker.strip() == "":
-            return pd.DataFrame()
+    ticker = normalize_ticker(ticker)
 
-        # จำกัด intraday
-        if interval in ["1m", "5m", "15m", "30m", "60m"]:
-            period = "60d"
+    for attempt in range(3):  # 🔥 retry 3 ครั้ง
+        try:
+            if "/" in ticker or ticker == "":
+                return pd.DataFrame()
 
-        df = yf.download(
-            ticker,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=True,
-            threads=False
-        )
+            df = yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=True,
+                threads=False,
+                timeout=10
+            )
 
-        if df is None or df.empty or len(df) < 50:
-            return pd.DataFrame()
+            if df is None or df.empty or len(df) < 50:
+                continue
 
-        df = fix_columns(df)
+            df = fix_columns(df)
+            df = df.dropna()
 
-        # 🔥 กันค่า NaN
-        df = df.dropna()
+            return df
 
-        return df
+        except Exception as e:
+            print(f"Retry {attempt+1} {ticker}: {e}")
 
-    except Exception as e:
-        print(f"❌ Download error {ticker}: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
+
 
 # =========================================
 # TELEGRAM
@@ -111,6 +119,20 @@ def create_features(df):
     # Close near High (แรงซื้อจริง)
     df['Close_High_Ratio'] = df['Close'] / df['High']
 
+    # Breakout Confirm (ทะลุ high เดิมแบบชัด)
+    df['Breakout_Strong'] = df['Close'] > df['High'].shift(1)
+    # Follow Through (วันถัดไปต้องเขียว)
+    df['Follow_Through'] = df['Close'].shift(-1) > df['Close']
+    # Trend Strength (EMA alignment)
+    df['EMA20_50'] = df['EMA20'] > df['EMA50']
+
+    # Distance from breakout (ไม่ไล่ราคา)
+    df['Breakout_Distance'] = df['Close'] / df['High_20']
+
+    df['Vol_Confirm'] = (
+    (df['Volume'] > df['Volume'].shift(1)) &
+    (df['Volume'].shift(1) > df['Volume'].shift(2)))
+
     return df
 
 # =========================================
@@ -121,21 +143,32 @@ def breakout_score(df):
 
     score = 0
 
-    # 🔥 breakout จริง
-    if last['Breakout'] > 1.01:
+    # ✅ breakout จริง (ต้องแรงกว่าเดิม)
+    if last['Breakout'] > 1.02:
+        score += 3
+
+    # ✅ volume ต้องแรงจริง
+    if last['Vol_Spike'] > 2:
+        score += 3
+
+    # ✅ trend ต้องขึ้น
+    if last['EMA20_50']:
         score += 2
 
-    # 🔥 volume เข้า
-    if last['Vol_Spike'] > 1.5:
+    # ✅ ปิดใกล้ high มากๆ
+    if last['Close_High_Ratio'] > 0.98:
         score += 2
 
-    # 🔥 บีบก่อนพุ่ง
-    if last['Tight_Range'] < 0.8:
+    # ✅ ไม่ไล่ราคาเกิน
+    if last['Breakout_Distance'] < 1.05:
         score += 1
 
-    # 🔥 ปิดใกล้ high
-    if last['Close_High_Ratio'] > 0.97:
-        score += 1
+    # ❌ ตัด breakout หลอก (ไส้เทียนยาว)
+    if (last['High'] - last['Close']) / last['High'] > 0.03:
+        score -= 2
+
+    if last['Vol_Confirm']:
+        score += 2
 
     return score
 
@@ -206,7 +239,7 @@ def train_model():
     joblib.dump((model, features), MODEL_PATH)
     print("✅ Model trained & saved")
     msg = f"""✅ Model trained & saved"""
-    send_alert(msg)
+    #send_alert(msg)
 
     return model, features
 
@@ -218,57 +251,69 @@ def load_model():
         model, features = joblib.load(MODEL_PATH)
         print("✅ Loaded saved model")
         msg = f"""✅ Loaded saved model"""
-        send_alert(msg)
+        #send_alert(msg)
         return model, features
     else:
         return train_model()
 
 # =========================================
-# SCANNER
+# SCANNER (แก้ใหม่)
 # =========================================
 def scan_market():
     data = (Query()
         .select('name', 'close', 'volume', 'relative_volume_10d_calc', 'RSI', 'EMA50')
         .where(
-            col('exchange').isin(['NASDAQ', 'NYSE']), 
-            col('close') >= 1,            
+            col('exchange').isin(['NASDAQ', 'NYSE']),
+            col('close') >= 5,
+
+            # 🔥 ผ่อนแล้ว (จาก 2 → 1.2)
             col('relative_volume_10d_calc') > 1.5,
+
+            # 🔥 เอา trend พอประมาณ
             col('close') > col('EMA50'),
-            col('RSI') < 70,
-            col('change') > 2   
+
+            # 🔥 RSI กว้างขึ้น (หา early move)
+            col('RSI').between(40, 65),
+
+            # 🔥 ลดความแรง (ไม่ต้อง +3%)
+            col('change') > 2
         )
         .order_by('volume', ascending=False)
-        .limit(30)
+        .limit(80)   # 🔥 เพิ่มจำนวน
         .get_scanner_data())
 
     df = pd.DataFrame(data[1])
     return df
 
 # =========================================
-# PREDICT
+# PREDICT (แก้ใหม่)
 # =========================================
 def predict_score(model, features, ticker):
     df = safe_download(ticker, period="3mo")
     if df.empty:
         return 0
 
-    df = create_features(df)
-    df = df.dropna()
-
+    df = create_features(df).dropna()
     if len(df) == 0:
         return 0
 
     last = df.iloc[-1]
 
+    # 🔥 ผ่อนเงื่อนไข (ไม่ kill เยอะ)
+    if last['Close'] < last['EMA50']:
+        return 0
+
+    if last['Vol_Spike'] < 1.1:
+        return 0
+
     # ML score
     X = np.array([[last[f] for f in features]])
     ml_score = model.predict_proba(X)[0][1]
 
-    # Breakout score
     b_score = breakout_score(df)
 
-    # 🔥 รวมคะแนน
-    final_score = ml_score + (b_score * 0.1)
+    # 🔥 balance ใหม่
+    final_score = (ml_score * 0.8) + (b_score * 0.2)
 
     return final_score
 
@@ -297,39 +342,39 @@ def calculate_trade_levels(df):
 def is_valid_ticker(ticker):
     if "/" in ticker:
         return False
-    if len(ticker) > 5:  # ตัดตัวแปลก
+
+    # 🔥 ตัดหุ้น class แปลก (เช่น BRK.A, TAP.A)
+    if "." in ticker:
+        return True  # ให้ normalize แทน ไม่ต้องทิ้ง
+
+    if len(ticker) > 6:
         return False
+
     return True
 
 # =========================================
-# MAIN
+# MAIN (แก้ threshold)
 # =========================================
 def main():
-    print("🚀Loading model...")
-    msg = f"""🚀Loading model..."""
-    send_alert(msg)
+    print("🚀 Loading model...")
     model, features = load_model()
 
-    print("📊Scanning market...")
-    msg = f"""📊Scanning market..."""
-    send_alert(msg) 
+    print("📊 Scanning market...")
     df_scan = scan_market()
 
-    print("🧠Evaluating...")
-    msg = f"""🧠Evaluating..."""
-    send_alert(msg)
+    print("🧠 Evaluating...")
 
     picks = []
 
     for _, row in df_scan.iterrows():
         ticker = row['name']
 
-        # 🔥 skip ตัวแปลก
         if not is_valid_ticker(ticker):
             continue
 
         score = predict_score(model, features, ticker)
 
+        # 🔥 ลดจาก 0.9 → 0.6
         if score > 0.8:
             df = safe_download(ticker)
 
@@ -337,7 +382,6 @@ def main():
                 continue
 
             df = create_features(df).dropna()
-
             if len(df) == 0:
                 continue
 
@@ -345,7 +389,8 @@ def main():
 
             picks.append((ticker, score, entry, sl, tp, rr, row['RSI']))
 
-    picks = sorted(picks, key=lambda x: x[1], reverse=True)[:5]
+    # 🔥 เอา top มากขึ้น
+    picks = sorted(picks, key=lambda x: x[1], reverse=True)[:10]
 
     if not picks:
         print("No strong signals today")
@@ -354,19 +399,17 @@ def main():
     for p in picks:
         ticker, score, entry, sl, tp, rr, rsi = p
 
-        msg = f"""
+        print(f"""
 🚀 TRADE SETUP
 Symbol: {ticker}
 Score: {score:.2f}
-RSI: {rsi}
+RSI: {rsi:.2f}
 
 🎯 Entry: {entry:.2f}
 🛑 Stop Loss: {sl:.2f}
 🎯 Take Profit: {tp:.2f}
 📊 RR: {rr:.2f}
-"""
-        print(msg)
-        send_alert(msg)
+""")
 
 # =========================================
 # RUN
