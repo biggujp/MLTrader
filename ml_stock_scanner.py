@@ -129,9 +129,7 @@ def create_features(df):
     # Distance from breakout (ไม่ไล่ราคา)
     df['Breakout_Distance'] = df['Close'] / df['High_20']
 
-    df['Vol_Confirm'] = (
-    (df['Volume'] > df['Volume'].shift(1)) &
-    (df['Volume'].shift(1) > df['Volume'].shift(2)))
+    df['Vol_Confirm'] = ((df['Volume'] > df['Volume'].shift(1))&(df['Volume'].shift(1) > df['Volume'].shift(2)))
 
     return df
 
@@ -265,16 +263,14 @@ def scan_market():
         .where(
             col('exchange').isin(['NASDAQ', 'NYSE']),
             col('close') >= 5,
+            col('ATR') > 0.8,
 
             # 🔥 ผ่อนแล้ว (จาก 2 → 1.2)
-            col('relative_volume_10d_calc') > 1.5,
-
+            col('relative_volume_10d_calc') > 1.8,
             # 🔥 เอา trend พอประมาณ
             col('close') > col('EMA50'),
-
             # 🔥 RSI กว้างขึ้น (หา early move)
-            col('RSI').between(40, 65),
-
+            col('RSI').between(40, 60),
             # 🔥 ลดความแรง (ไม่ต้อง +3%)
             col('change') > 2
         )
@@ -310,10 +306,11 @@ def predict_score(model, features, ticker):
     X = np.array([[last[f] for f in features]])
     ml_score = model.predict_proba(X)[0][1]
 
-    b_score = breakout_score(df)
+    b_score = breakout_score(df) / 10  # normalize ให้อยู่ในช่วง 0-1
 
-    # 🔥 balance ใหม่
-    final_score = (ml_score * 0.8) + (b_score * 0.2)
+    final_score = (ml_score * 0.7) + (b_score * 0.3)
+
+    print(f"{ticker} | ML: {ml_score:.2f} | BO: {b_score:.2f} | FINAL: {final_score:.2f}")
 
     return final_score
 
@@ -398,6 +395,7 @@ def main():
 
     for p in picks:
         ticker, score, entry, sl, tp, rr, rsi = p
+        
 
         print(f"""
 🚀 TRADE SETUP
