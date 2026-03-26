@@ -259,24 +259,27 @@ def load_model():
 # =========================================
 def scan_market():
     data = (Query()
-        .select('name','close','high','volume','change','relative_volume_10d_calc','RSI')
+        .select(
+            'name',
+            'close',
+            'high',
+            'RSI',
+            'volume',
+            'change',
+            'relative_volume_10d_calc'
+        )
         .where(
             col('exchange').isin(['NASDAQ', 'NYSE']),
-            col('close') >= 10,
+            col('relative_volume_10d_calc') > 3,
             col('volume') > 2e6,
-            # 🔥 ผ่อนแล้ว (จาก 2 → 1.2)
-            col('relative_volume_10d_calc') > 1.8,
-            # 🔥 เอา trend พอประมาณ
-            col('close') >= col('high').multiply(0.98),
-            # 🔥 RSI กว้างขึ้น (หา early move)
+            col('change') > 2,
             col('RSI') > 60,
             col('RSI') > 70,
-            # 🔥 ลดความแรง (ไม่ต้อง +3%)
-            col('change') > 2
+            col('close') > 10
         )
-        .order_by('relative_volume_10d_calc', ascending=False)
-        .limit(15)   # 🔥 เพิ่มจำนวน
-        .get_scanner_data())
+        .limit(30)
+        .get_scanner_data()
+    )
 
     df = pd.DataFrame(data[1])
     return df
