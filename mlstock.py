@@ -1,17 +1,30 @@
 # =========================================
 # IMPORT
 # =========================================
-from tradingview_screener import Query, col
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
 import ta
-from xgboost import XGBClassifier
 import joblib
 import os
+import pandas_market_calendars as mcal
+import time
 import sys
+from tradingview_screener import Query, col
+from xgboost import XGBClassifier
+from datetime import datetime
 sys.stdout.reconfigure(encoding='utf-8')
+
+
+# =========================================
+# CHECK MARKET OPEN
+# =========================================
+def is_us_market_open_today():
+    nyse = mcal.get_calendar('NYSE')
+    today = datetime.now().date()
+    schedule = nyse.schedule(start_date=today, end_date=today)
+    return not schedule.empty
 
 # =========================================
 # CONFIG
@@ -21,7 +34,10 @@ CHAT_ID = "-1003805957111"
 
 MODEL_PATH = "model.pkl"
 
-TICKERS_TRAIN = ["AAPL", "NVDA", "TSLA", "AMD", "MSFT", "META", "AMZN", "MU", "INTC", "GOOG","SMCI", "JPM","LLY","PLTR"]
+TICKERS_TRAIN = [
+    "AAPL","NVDA","TSLA","AMD","MSFT","META",
+    "AMZN","MU","INTC","GOOG","SMCI","JPM","LLY","PLTR"
+]
 
 # =========================================
 # UTILS
@@ -33,16 +49,14 @@ def fix_columns(df):
 
 def normalize_ticker(ticker):
     ticker = ticker.strip()
-    # 🔥 แก้ . → -
     if "." in ticker:
         ticker = ticker.replace(".", "-")
     return ticker
 
-
 def safe_download(ticker, period="3mo", interval="1d"):
     ticker = normalize_ticker(ticker)
 
-    for attempt in range(3):  # 🔥 retry 3 ครั้ง
+    for attempt in range(3):
         try:
             if "/" in ticker or ticker == "":
                 return pd.DataFrame()
@@ -62,7 +76,6 @@ def safe_download(ticker, period="3mo", interval="1d"):
 
             df = fix_columns(df)
             df = df.dropna()
-
             return df
 
         except Exception as e:
@@ -70,23 +83,21 @@ def safe_download(ticker, period="3mo", interval="1d"):
 
     return pd.DataFrame()
 
-
 # =========================================
 # TELEGRAM
 # =========================================
 def send_alert(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        res = requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
-        if res.status_code != 200:
-            print("Telegram Error:", res.text)
-    except Exception as e:
-        print("Telegram Exception:", e)
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except:
+        pass
 
 # =========================================
 # FEATURE ENGINEERING
 # =========================================
 def create_features(df):
+
     df['Return_5d'] = df['Close'].pct_change(5)
     df['Return_10d'] = df['Close'].pct_change(10)
 
@@ -102,66 +113,60 @@ def create_features(df):
 
     df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
 
-    # 🔥 เพิ่มความแม่น
-    df['High_20'] = df['High'].rolling(20).max()
+    # ✅ FIX: shift(1)
+    df['High_20'] = df['High'].rolling(20).max().shift(1)
     df['Breakout'] = df['Close'] / df['High_20']
+
     df['Momentum'] = df['Close'] / df['Close'].shift(5)
 
-    # Volume Spike
     df['Vol_Avg'] = df['Volume'].rolling(20).mean()
     df['Vol_Spike'] = df['Volume'] / df['Vol_Avg']
 
-    # Range Compression (สะสมก่อนพุ่ง)
     df['Range'] = df['High'] - df['Low']
     df['Range_Avg'] = df['Range'].rolling(10).mean()
     df['Tight_Range'] = df['Range'] / df['Range_Avg']
 
-    # Close near High (แรงซื้อจริง)
     df['Close_High_Ratio'] = df['Close'] / df['High']
 
-    # Breakout Confirm (ทะลุ high เดิมแบบชัด)
     df['Breakout_Strong'] = df['Close'] > df['High'].shift(1)
-    # Follow Through (วันถัดไปต้องเขียว)
-    df['Follow_Through'] = df['Close'].shift(-1) > df['Close']
-    # Trend Strength (EMA alignment)
+
     df['EMA20_50'] = df['EMA20'] > df['EMA50']
 
-    # Distance from breakout (ไม่ไล่ราคา)
     df['Breakout_Distance'] = df['Close'] / df['High_20']
 
-    df['Vol_Confirm'] = ((df['Volume'] > df['Volume'].shift(1))&(df['Volume'].shift(1) > df['Volume'].shift(2)))
+    df['Vol_Confirm'] = (
+        (df['Volume'] > df['Volume'].shift(1)) &
+        (df['Volume'].shift(1) > df['Volume'].shift(2))
+    )
+
+    df['EMA20_50'] = df['EMA20_50'].astype(int)
+    df['Breakout_Strong'] = df['Breakout_Strong'].astype(int)
+    df['Vol_Confirm'] = df['Vol_Confirm'].astype(int)
 
     return df
 
 # =========================================
-# ฺBREAKOUT SCORE (สำหรับกรองตัวเทพก่อนเข้าโมเดล)
+# BREAKOUT SCORE
 # =========================================
 def breakout_score(df):
     last = df.iloc[-1]
-
     score = 0
 
-    # ✅ breakout จริง (ต้องแรงกว่าเดิม)
     if last['Breakout'] > 1.02:
         score += 3
 
-    # ✅ volume ต้องแรงจริง
     if last['Vol_Spike'] > 2:
         score += 3
 
-    # ✅ trend ต้องขึ้น
     if last['EMA20_50']:
         score += 2
 
-    # ✅ ปิดใกล้ high มากๆ
     if last['Close_High_Ratio'] > 0.98:
         score += 2
 
-    # ✅ ไม่ไล่ราคาเกิน
     if last['Breakout_Distance'] < 1.05:
         score += 1
 
-    # ❌ ตัด breakout หลอก (ไส้เทียนยาว)
     if (last['High'] - last['Close']) / last['High'] > 0.03:
         score -= 2
 
@@ -171,9 +176,10 @@ def breakout_score(df):
     return score
 
 # =========================================
-# TARGET (TP/SL BASED)
+# TARGET (FIXED)
 # =========================================
 def create_target(df, tp=0.06, sl=0.03, max_days=5):
+
     targets = []
 
     for i in range(len(df)):
@@ -184,13 +190,20 @@ def create_target(df, tp=0.06, sl=0.03, max_days=5):
             targets.append(0)
             continue
 
-        hit_tp = (future['High'] >= entry * (1 + tp)).any()
-        hit_sl = (future['Low'] <= entry * (1 - sl)).any()
+        hit = 0
 
-        if hit_tp and not hit_sl:
-            targets.append(1)
-        else:
-            targets.append(0)
+        # ✅ FIX: check order (realistic)
+        for _, row in future.iterrows():
+
+            if row['Low'] <= entry * (1 - sl):
+                hit = 0
+                break
+
+            if row['High'] >= entry * (1 + tp):
+                hit = 1
+                break
+
+        targets.append(hit)
 
     df['Target'] = targets
     return df
@@ -211,22 +224,27 @@ def train_model():
 
         df_all = pd.concat([df_all, df])
 
+    # ✅ FIX data clean
+    df_all = df_all.replace([np.inf, -np.inf], np.nan)
     df_all = df_all.dropna()
 
     features = [
-        'Return_5d', 'Return_10d',
-        'Trend', 'ATR',
-        'Vol_Ratio', 'RSI',
-        'Breakout', 'Momentum'
+        'Return_5d','Return_10d','Momentum',
+        'Trend','EMA20_50',
+        'Breakout','Breakout_Distance',
+        'Close_High_Ratio','Breakout_Strong',
+        'Vol_Ratio','Vol_Spike','Vol_Confirm',
+        'ATR','Tight_Range',
+        'RSI'
     ]
 
     X = df_all[features]
     y = df_all['Target']
 
     model = XGBClassifier(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.05,
+        n_estimators=400,      # 🔥 เพิ่ม
+        max_depth=6,           # 🔥 ลึกขึ้น
+        learning_rate=0.03,    # 🔥 smooth ขึ้น
         subsample=0.8,
         colsample_bytree=0.8,
         eval_metric='logloss'
@@ -235,10 +253,9 @@ def train_model():
     model.fit(X, y)
 
     joblib.dump((model, features), MODEL_PATH)
-    print("✅ Model trained & saved")
     msg = f"""✅ Model trained & saved"""
+    print(msg)
     #send_alert(msg)
-
     return model, features
 
 # =========================================
@@ -246,48 +263,40 @@ def train_model():
 # =========================================
 def load_model():
     if os.path.exists(MODEL_PATH):
-        model, features = joblib.load(MODEL_PATH)
-        print("✅ Loaded saved model")
-        msg = f"""✅ Loaded saved model"""
+        msg = f"""✅ Loaded model"""
+        print(msg)
         #send_alert(msg)
-        return model, features
-    else:
-        return train_model()
+        return joblib.load(MODEL_PATH)
+    return train_model()
 
 # =========================================
-# SCANNER (แก้ใหม่)
+# SCANNER (FIXED RSI)
 # =========================================
 def scan_market():
     data = (Query()
         .select(
-            'name',
-            'close',
-            'high',
-            'RSI',
-            'volume',
-            'change',
-            'relative_volume_10d_calc'
+            'name','close','high','RSI',
+            'volume','change','relative_volume_10d_calc'
         )
         .where(
-            col('exchange').isin(['NASDAQ', 'NYSE']),
-            col('relative_volume_10d_calc') > 2,
-            col('volume') > 2e6,
+            col('exchange').isin(['NASDAQ','NYSE']),
+            col('relative_volume_10d_calc') > 1.3,
+            col('volume') > 1e6,
             col('change') > 2,
-            col('RSI') > 60,
-            col('RSI') > 70,
-            col('close') > 10
+            col('RSI').between(55, 80),   # 🔥 sweet spot (ไม่ overbought เกิน)
+            col('close').between(5, 300)
         )
-        .limit(30)
+        .limit(100)
         .get_scanner_data()
     )
 
-    df = pd.DataFrame(data[1])
-    return df
+    return pd.DataFrame(data[1])
 
 # =========================================
-# PREDICT (แก้ใหม่)
+# PREDICT
 # =========================================
 def predict_score(model, features, ticker):
+
     df = safe_download(ticker, period="3mo")
     if df.empty:
         return 0
@@ -298,75 +307,83 @@ def predict_score(model, features, ticker):
 
     last = df.iloc[-1]
 
-    # 🔥 ผ่อนเงื่อนไข (ไม่ kill เยอะ)
-    if last['Close'] < last['EMA50']:
+    # 🔥 soften filter
+    if last['Close'] < last['EMA50'] * 0.97:
         return 0
 
-    if last['Vol_Spike'] < 1.1:
+    if last['Vol_Spike'] < 1.0:
         return 0
 
-    # ML score
     X = np.array([[last[f] for f in features]])
     ml_score = model.predict_proba(X)[0][1]
 
-    b_score = breakout_score(df) / 10  # normalize ให้อยู่ในช่วง 0-1
+    b_score = breakout_score(df) / 10
 
-    final_score = (ml_score * 0.7) + (b_score * 0.3)
-
-    print(f"{ticker} | ML: {ml_score:.2f} | BO: {b_score:.2f} | FINAL: {final_score:.2f}")
+    # 🔥 balance ใหม่
+    final_score = (ml_score * 0.65) + (b_score * 0.35)
 
     return final_score
 
 # =========================================
-# TRADE LEVELS (สำหรับใส่ใน alert เพื่อให้เห็นภาพก่อนเข้าเทรด)
+# TRADE LEVEL
 # =========================================
 def calculate_trade_levels(df):
+
     last = df.iloc[-1]
-
     entry = last['Close']
-
-    # ใช้ ATR จะแม่นกว่า
     atr = last['ATR']
 
-    stop_loss = entry - (atr * 1.5)
-    take_profit = entry + (atr * 3)
+    sl = entry - (atr * 1.5)
+    tp = entry + (atr * 3)
 
-    rr = (take_profit - entry) / (entry - stop_loss)
+    rr = (tp - entry) / (entry - sl)
 
-    return entry, stop_loss, take_profit, rr
-
+    return entry, sl, tp, rr
 
 # =========================================
-# VALID TICKER (กรอง ticker ที่มีรูปแบบแปลกๆ เช่นมี / ซึ่งโมเดลไม่ถนัด)
+# VALID TICKER
 # =========================================
 def is_valid_ticker(ticker):
     if "/" in ticker:
         return False
-
-    # 🔥 ตัดหุ้น class แปลก (เช่น BRK.A, TAP.A)
-    if "." in ticker:
-        return True  # ให้ normalize แทน ไม่ต้องทิ้ง
-
     if len(ticker) > 6:
         return False
-
     return True
 
 # =========================================
-# MAIN (แก้ threshold)
+# DEDUPE PICKS
+# =========================================
+def dedupe_picks(picks):
+    seen = set()
+    unique = []
+
+    for p in picks:
+        ticker = p[0]
+
+        if ticker not in seen:
+            unique.append(p)
+            seen.add(ticker)
+
+    return unique    
+
+# =========================================
+# MAIN
 # =========================================
 def main():
+
     print("🚀 Loading model...")
+    #send_alert("🚀 Loading model...")
     model, features = load_model()
 
-    print("📊 Scanning market...")
+    print("📊 Scanning...")
+    #send_alert("📊 Scanning...")
     df_scan = scan_market()
 
-    print("🧠 Evaluating...")
-
-    picks = []
+    strong = []
+    normal = []
 
     for _, row in df_scan.iterrows():
+
         ticker = row['name']
 
         if not is_valid_ticker(ticker):
@@ -374,46 +391,95 @@ def main():
 
         score = predict_score(model, features, ticker)
 
-        # 🔥 ลดจาก 0.9 → 0.6
-        if score > 0.8:
-            df = safe_download(ticker)
+        if score == 0:
+            continue
 
-            if df.empty:
-                continue
+        df = safe_download(ticker)
+        if df.empty:
+            continue
 
-            df = create_features(df).dropna()
-            if len(df) == 0:
-                continue
+        df = create_features(df).dropna()
+        if len(df) == 0:
+            continue
 
-            entry, sl, tp, rr = calculate_trade_levels(df)
+        entry, sl, tp, rr = calculate_trade_levels(df)
 
-            picks.append((ticker, score, entry, sl, tp, rr, row['RSI']))
+        data = (ticker, score, entry, sl, tp, rr, row['RSI'])
 
-    # 🔥 เอา top มากขึ้น
-    picks = sorted(picks, key=lambda x: x[1], reverse=True)[:10]
+        # 🔥 Tier system
+        if score >= 0.75:
+            strong.append(data)
+        elif score >= 0.6:
+            normal.append(data)
 
-    if not picks:
-        print("No strong signals today")
-        return
+    # 🔥 sort
+    strong = sorted(strong, key=lambda x: x[1], reverse=True)
+    normal = sorted(normal, key=lambda x: x[1], reverse=True)
 
+    # 🔥 combine
+    picks = strong[:5]
+
+    if len(picks) < 5:
+        picks += normal[:(5 - len(picks))]
+
+    # 🔥 กันซ้ำ
+    picks = dedupe_picks(picks)    
+
+    # 🔥 fallback ขั้นสุด (กันไม่มีจริง ๆ)
+    if len(picks) < 5:
+        print("⚠️ Using extended fallback...")
+
+        all_scores = strong + normal
+
+        if len(all_scores) < 5:
+            for _, row in df_scan.iterrows():
+                ticker = row['name']
+
+                if not is_valid_ticker(ticker):
+                    continue
+
+                score = predict_score(model, features, ticker)
+
+                df = safe_download(ticker)
+                if df.empty:
+                    continue
+
+                df = create_features(df).dropna()
+                if len(df) == 0:
+                    continue
+
+                entry, sl, tp, rr = calculate_trade_levels(df)
+
+                all_scores.append((ticker, score, entry, sl, tp, rr, row['RSI']))
+                
+
+        all_scores = dedupe_picks(all_scores)
+        picks = sorted(all_scores, key=lambda x: x[1], reverse=True)[:5]
+
+    # 🔥 OUTPUT
     for p in picks:
         ticker, score, entry, sl, tp, rr, rsi = p
-        
-
-        print(f"""
-🚀 TRADE SETUP
+        tier = "🔥 STRONG" if score >= 0.75 else "👍 NORMAL"
+        msg = f"""
+{tier}
 Symbol: {ticker}
 Score: {score:.2f}
 RSI: {rsi:.2f}
-
 🎯 Entry: {entry:.2f}
 🛑 Stop Loss: {sl:.2f}
 🎯 Take Profit: {tp:.2f}
 📊 RR: {rr:.2f}
-""")
+"""
+        print(msg)
+        #send_alert(msg)
 
 # =========================================
 # RUN
 # =========================================
 if __name__ == "__main__":
-    main()
+    if is_us_market_open_today():
+        main()
+    else:
+        msg = f"""⏰ US market is closed today."""
+        print(msg)
+        #send_alert(msg)
