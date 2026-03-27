@@ -247,6 +247,8 @@ def train_model():
         learning_rate=0.03,    # 🔥 smooth ขึ้น
         subsample=0.8,
         colsample_bytree=0.8,
+        reg_alpha=0.5,
+        reg_lambda=1.0,
         eval_metric='logloss'
     )
 
@@ -311,7 +313,10 @@ def predict_score(model, features, ticker):
     if last['Close'] < last['EMA50'] * 0.97:
         return 0
 
-    if last['Vol_Spike'] < 1.0:
+    if last['Vol_Spike'] < 1.5:
+        return 0
+
+    if not last['Vol_Confirm']:
         return 0
 
     X = np.array([[last[f] for f in features]])
