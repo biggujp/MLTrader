@@ -40,9 +40,17 @@ def get_data():
                 ) \
                 .where(
                     Column("exchange").isin(["NASDAQ","NYSE","AMEX"]),
-                    Column("market_cap_basic") < 5_000_000_000,
+
+                    # ===== รายใหญ่เข้า =====
+                    Column("market_cap_basic") > 1_000_000_000,
+                    Column("market_cap_basic") < 50_000_000_000,
+
+                    Column("average_volume_30d_calc") > 1_000_000,
+                    Column("close") > 5,
+
+                    # ===== base filter =====
                     Column("volume") > 500000
-                ) \
+                )\
                 .limit(200)
 
             df = q.get_scanner_data()[1]
@@ -99,6 +107,25 @@ def calculate_score(row):
     # ===== Small Cap =====
     if row["market_cap_basic"] < 1_000_000_000:
         score += 5
+
+    # ===== Institutional Flow =====
+    dollar_volume = row["close"] * row["volume"]
+
+    if dollar_volume > 50_000_000:
+        score += 15
+
+    if dollar_volume > 100_000_000:
+        score += 5
+
+    if row["average_volume_30d_calc"] > 2_000_000:
+        score += 10
+
+    # กัน fake breakout
+    if row["close"] < 5:
+        score -= 20
+
+    if row["market_cap_basic"] < 500_000_000:
+        score -= 10
 
     return score
 
